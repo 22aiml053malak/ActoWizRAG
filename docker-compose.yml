@@ -1,0 +1,132 @@
+version: "3.9"
+
+# ── Shared environment ────────────────────────────────────────────────────────
+# Override any of these in your .env file — docker-compose reads .env automatically.
+x-app-env: &app-env
+  DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://postgres:postgres@postgres:5432/actowiz_rag}
+  DATABASE_SYNC_URL: ${DATABASE_SYNC_URL:-postgresql://postgres:postgres@postgres:5432/actowiz_rag}
+  REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+  EMBED_MODEL_NAME: ${EMBED_MODEL_NAME:-sentence-transformers/all-MiniLM-L6-v2}
+  EMBED_DIM: ${EMBED_DIM:-384}
+  RERANK_MODEL_NAME: ${RERANK_MODEL_NAME:-cross-encoder/ms-marco-MiniLM-L-6-v2}
+  RERANK_TOP_N: ${RERANK_TOP_N:-5}
+  SIMILARITY_TOP_K: ${SIMILARITY_TOP_K:-15}
+  SENTENCE_WINDOW_SIZE: ${SENTENCE_WINDOW_SIZE:-3}
+  CODE_CHUNK_LINES: ${CODE_CHUNK_LINES:-40}
+  CODE_CHUNK_OVERLAP: ${CODE_CHUNK_OVERLAP:-15}
+  CODE_CHUNK_MAX_CHARS: ${CODE_CHUNK_MAX_CHARS:-1500}
+  STORAGE_DIR: /app/storage/uploads
+  LLM_PROVIDER: ${LLM_PROVIDER:-groq}
+  LLM_API_KEY: ${LLM_API_KEY:-}
+  LLM_API_BASE_URL: ${LLM_API_BASE_URL:-https://api.groq.com/openai/v1}
+  LLM_MODEL_NAME: ${LLM_MODEL_NAME:-llama3-8b-8192}
+  LLM_MAX_TOKENS: ${LLM_MAX_TOKENS:-1024}
+  LLM_TEMPERATURE: ${LLM_TEMPERATURE:-0.1}
+  APP_ENV: ${APP_ENV:-development}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+
+services:
+  # ── PostgreSQL with pgvector ──────────────────────────────────────────────────
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: actowiz_postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: actowiz_rag
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d actowiz_rag"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ── Redis ─────────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: actowiz_redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Alembic migration runner ──────────────────────────────────────────────────
+  # Runs once on startup to apply pending migrations; exits 0 when done.
+  # The api and worker services wait for this to complete via depends_on.
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    container_name: actowiz_migrate
+    command: alembic upgrade head
+    environment:
+      <<: *app-env
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"   # Run once and exit — not a long-running service
+
+  # ── FastAPI API server ─────────────────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    container_name: actowiz_api
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    environment:
+      <<: *app-env
+    env_file:
+      - .env
+    volumes:
+      - ./app:/app/app         # Hot-reload in development
+      - uploads_data:/app/storage/uploads
+    ports:
+      - "8000:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Celery worker ─────────────────────────────────────────────────────────────
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    container_name: actowiz_worker
+    command: >
+      celery -A app.workers.celery_app:celery_app worker
+      --loglevel=info
+      --concurrency=2
+      --prefetch-multiplier=1
+    environment:
+      <<: *app-env
+    env_file:
+      - .env
+    volumes:
+      - ./app:/app/app
+      - uploads_data:/app/storage/uploads
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  uploads_data:

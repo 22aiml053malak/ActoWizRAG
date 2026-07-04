@@ -1,0 +1,55 @@
+# ── Web framework ─────────────────────────────────────────────────────────────
+fastapi==0.111.1
+uvicorn[standard]==0.30.1
+python-multipart==0.0.9        # Required for FastAPI file upload (UploadFile)
+aiofiles==23.2.1               # Async file I/O
+
+# ── Configuration ─────────────────────────────────────────────────────────────
+pydantic==2.7.4
+pydantic-settings==2.3.4
+
+# ── Database / ORM ────────────────────────────────────────────────────────────
+sqlalchemy==2.0.31
+asyncpg==0.29.0                # Async PostgreSQL driver (SQLAlchemy 2.x)
+psycopg2-binary==2.9.9         # Sync driver for PGVectorStore / Celery tasks
+alembic==1.13.2                # Database migrations
+
+# ── Celery + Redis ────────────────────────────────────────────────────────────
+celery==5.4.0
+redis==5.0.7
+kombu==5.3.4
+
+# ── LlamaIndex core ───────────────────────────────────────────────────────────
+llama-index-core==0.10.57
+
+# ── LlamaIndex integrations ───────────────────────────────────────────────────
+llama-index-vector-stores-postgres==0.1.14   # PGVectorStore
+llama-index-embeddings-huggingface==0.2.3    # HuggingFaceEmbedding
+llama-index-readers-file==0.1.33             # PDFReader
+
+# ── Embedding / reranking models (Hugging Face) ───────────────────────────────
+sentence-transformers==3.0.1
+# The cross-encoder reranker (SentenceTransformerRerank) uses sentence-transformers
+# internally — no separate install needed.
+
+# ── Code chunking ─────────────────────────────────────────────────────────────
+# tree-sitter-language-pack replaces the deprecated tree_sitter_languages package.
+# If this fails to install on your platform, install tree_sitter_languages instead
+# and document the substitution in the README (see §1 in the spec).
+tree-sitter==0.21.3
+tree-sitter-language-pack==0.5.0
+
+# ── PDF parsing ───────────────────────────────────────────────────────────────
+pypdf==4.3.1
+
+# ── HTTP client (LLM Gateway) ────────────────────────────────────────────────
+httpx==0.27.0
+
+# ── Testing ───────────────────────────────────────────────────────────────────
+pytest==8.2.2
+pytest-asyncio==0.23.8
+pytest-mock==3.14.0
+httpx                          # Also used by HTTPX TestClient for FastAPI
+
+# ── Utilities ─────────────────────────────────────────────────────────────────
+python-dotenv==1.0.1
