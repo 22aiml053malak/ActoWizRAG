@@ -366,6 +366,20 @@ curl -X DELETE http://localhost:8000/api/v1/documents/550e8400-...
 - Python 3.11+
 - PostgreSQL with pgvector (`CREATE EXTENSION IF NOT EXISTS vector;`)
 - Redis running locally (`redis-server` or via Docker)
+- Poppler + Tesseract for scanned PDF OCR
+
+Ubuntu/WSL:
+
+```bash
+sudo apt update
+sudo apt install -y poppler-utils tesseract-ocr
+```
+
+macOS:
+
+```bash
+brew install poppler tesseract
+```
 
 ### Steps
 
@@ -584,7 +598,7 @@ Embedding is CPU-bound and runs synchronously inside the Celery task. At 100-dev
 
 ### tree-sitter-language-pack
 
-The `tree_sitter_languages` package was renamed to `tree-sitter-language-pack`. `requirements.txt` pins `tree-sitter-language-pack==0.5.0`. If installation fails on your platform, install `tree_sitter_languages` instead — the `CodeSplitter` import is unchanged. The `chunking_service.py` has a fallback to `SentenceWindowNodeParser` if `CodeSplitter` fails, and will log a warning.
+The `tree_sitter_languages` package was renamed to `tree-sitter-language-pack`. `requirements.txt` pins `tree-sitter-language-pack==0.5.0` with `tree-sitter==0.23.2`, which satisfies the language pack's `tree-sitter>=0.23.2` requirement. If installation fails on your platform, install `tree_sitter_languages` instead -- the `CodeSplitter` import is unchanged. The `chunking_service.py` has a fallback to `SentenceWindowNodeParser` if `CodeSplitter` fails, and will log a warning.
 
 ---
 

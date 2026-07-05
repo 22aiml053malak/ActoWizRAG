@@ -59,16 +59,38 @@ class Settings(BaseSettings):
         description="Wide candidate set size for initial vector search",
     )
 
-    # ── Sentence-window chunking ───────────────────────────────────────────────
-    SENTENCE_WINDOW_SIZE: int = Field(
-        default=3,
-        description="Number of surrounding sentences to store as window context",
+    # ── Structure-aware chunking ───────────────────────────────────────────────
+    STRUCTURE_CHUNK_MAX_CHARS: int = Field(
+        default=1200,
+        description="Target chunk size for structure-aware prose chunking",
+    )
+    PAGE_CHUNK_OVERLAP_CHARS: int = Field(
+        default=200,
+        description="Character overlap between adjacent page chunks for sliding-window context",
     )
 
     # ── Code chunking ──────────────────────────────────────────────────────────
     CODE_CHUNK_LINES: int = Field(default=40)
     CODE_CHUNK_OVERLAP: int = Field(default=15)
     CODE_CHUNK_MAX_CHARS: int = Field(default=1500)
+
+    # ── PDF / OCR loading ────────────────────────────────────────────────────
+    PDF_NATIVE_TEXT_MIN_CHARS: int = Field(
+        default=300,
+        description="Minimum extracted PDF text length before OCR fallback is skipped",
+    )
+    PADDLEOCR_LANG: str = Field(
+        default="en",
+        description="PaddleOCR language code (en, ch, fr, es, etc.)",
+    )
+    PADDLEOCR_DPI: int = Field(
+        default=200,
+        description="DPI used when rendering PDF pages for PaddleOCR structure extraction",
+    )
+    OCR_DPI: int = Field(
+        default=300,
+        description="DPI used when rendering scanned PDFs for tesseract OCR (last-resort fallback)",
+    )
 
     # ── Storage ────────────────────────────────────────────────────────────────
     STORAGE_DIR: str = Field(
@@ -87,12 +109,27 @@ class Settings(BaseSettings):
         description="Base URL for OpenAI-compatible providers",
     )
     LLM_MODEL_NAME: str = Field(
-        default="llama3-8b-8192",
+        default="llama-3.1-8b-instant",
         description="Model name / deployment name for the active LLM provider",
     )
     LLM_MAX_TOKENS: int = Field(default=1024)
     LLM_TEMPERATURE: float = Field(default=0.1)
 
+    # ── Vision Document Parsing ───────────────────────────────────────────────
+    # Deprecated — replaced by PaddleOCR. Kept for backward compatibility with
+    # existing .env files but no longer used by document_loader_service.py.
+    VISION_MODEL_NAME: str = Field(
+        default="meta-llama/llama-4-scout-17b-16e-instruct",
+        description="[DEPRECATED] Vision-capable model used for OCR/layout understanding.",
+    )
+    VISION_RENDER_DPI: int = Field(
+        default=150,
+        description="[DEPRECATED] DPI used when rendering PDF pages before sending to the vision model.",
+    )
+    VISION_MAX_TOKENS: int = Field(
+        default=4096,
+        description="[DEPRECATED] Maximum output tokens returned by the vision model.",
+    )
     # ── App ────────────────────────────────────────────────────────────────────
     APP_ENV: Literal["development", "staging", "production"] = Field(default="development")
     LOG_LEVEL: str = Field(default="INFO")

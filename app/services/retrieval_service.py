@@ -1,24 +1,21 @@
 """
-Retrieval service — retrieve → rerank → window-replace.
+Retrieval service — embed → cosine search → window-expand → return chunks.
 
-This service implements the three-stage retrieval pipeline:
+Deliberately simple:
+  1. Embed the query with the same model used at ingestion time.
+  2. Cosine vector search via PGVectorStore (no metadata filters).
+  3. Replace each node's tight text with its stored window for richer LLM context.
+  4. Map to ChunkResult response objects.
 
-  1. Vector search (wide candidate set, similarity_top_k=15 by default)
-  2. Cross-encoder reranking (cuts down to top_k, ranked by semantic relevance)
-  3. Window replacement (swaps each node's tight sentence for its surrounding window)
-
-The output is a list of ChunkResult objects ready to be serialised and returned
-to the caller or passed to LLMService for answer generation.
+The cross-encoder reranker was removed because it was silently dropping all
+results when nodes had empty text fields — cosine similarity alone is fast
+and accurate enough for the current corpus size.
 """
 
 from __future__ import annotations
 
-from typing import Any
+from llama_index.core.schema import BaseNode, NodeWithScore
 
-from llama_index.core.postprocessor import SentenceTransformerRerank, MetadataReplacementPostProcessor
-from llama_index.core.schema import NodeWithScore, QueryBundle
-
-from app.core.config import settings
 from app.core.logger import get_logger
 from app.models.response import ChunkResult
 from app.repositories.vector_repository import VectorRepository
@@ -26,13 +23,10 @@ from app.services.embedding_service import EmbeddingService
 
 logger = get_logger(__name__)
 
+_INVALID_METADATA_VALUES = {"", "none", "null", "undefined", "string"}
+
 
 class RetrievalService:
-    """
-    Orchestrates the three-stage RAG retrieval pipeline.
-
-    Dependencies are injected so this class can be unit-tested with mocks.
-    """
 
     def __init__(
         self,
@@ -41,94 +35,108 @@ class RetrievalService:
     ) -> None:
         self._vector_repo = vector_repo
         self._embedding_service = embedding_service
-
-        logger.info(
-            "Loading reranker model",
-            extra={"model": settings.RERANK_MODEL_NAME},
-        )
-        self._reranker = SentenceTransformerRerank(
-            model=settings.RERANK_MODEL_NAME,
-            top_n=settings.RERANK_TOP_N,
-        )
-        self._window_replacer = MetadataReplacementPostProcessor(
-            target_metadata_key="window"
-        )
-        logger.info("RetrievalService initialised")
+        logger.info("RetrievalService initialised (cosine-only, no reranker)")
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
-    def retrieve(
-        self,
-        query: str,
-        *,
-        top_k: int = 5,
-        document_id: str | None = None,
-        filters: dict[str, Any] | None = None,
-    ) -> list[ChunkResult]:
+    def retrieve(self, query: str, *, top_k: int = 5) -> list[ChunkResult]:
         """
-        Run the full retrieve → rerank → window-replace pipeline.
+        Retrieve the top_k most similar chunks for *query*.
 
         Args:
-            query:       Natural language query string.
-            top_k:       Number of chunks to return after reranking.
-            document_id: Optional filter — restrict to a single document.
-            filters:     Optional additional metadata filters.
+            query:  Natural language question or keyword string.
+            top_k:  Number of chunks to return.
 
         Returns:
-            Ordered list of ChunkResult (best match first).
+            List of ChunkResult ordered by cosine similarity (best first).
         """
-        # ── Step 1: Embed the query ────────────────────────────────────────────
+        # Step 1 — embed
         query_embedding = self._embedding_service.embed_query(query)
         logger.debug("Query embedded", extra={"query": query[:80]})
 
-        # ── Step 2: Wide vector search ─────────────────────────────────────────
+        # Step 2 — vector search (fetch 3× top_k so window expansion has room)
+        fetch_k = max(top_k * 3, 15)
         candidates: list[NodeWithScore] = self._vector_repo.search(
             query_embedding=query_embedding,
-            similarity_top_k=settings.SIMILARITY_TOP_K,
-            document_id=document_id,
-            extra_filters=filters,
+            similarity_top_k=fetch_k,
         )
         logger.info(
-            "Vector search returned candidates",
-            extra={"candidates": len(candidates)},
+            "Vector search complete",
+            extra={"candidates": len(candidates), "fetch_k": fetch_k},
         )
 
         if not candidates:
             return []
 
-        # ── Step 3: Rerank ─────────────────────────────────────────────────────
-        # Override the reranker's top_n with the caller's top_k.
-        self._reranker.top_n = top_k
-        query_bundle = QueryBundle(query_str=query)
-        reranked: list[NodeWithScore] = self._reranker.postprocess_nodes(
-            candidates, query_bundle=query_bundle
-        )
-        logger.info(
-            "Reranking complete",
-            extra={"before": len(candidates), "after": len(reranked)},
-        )
+        # Step 3 — hydrate node text (PGVectorStore sometimes returns empty .text)
+        for nws in candidates:
+            self._hydrate(nws.node)
 
-        # ── Step 4: Window replacement ────────────────────────────────────────
-        # Swaps each node's tight sentence / code chunk text for the stored
-        # surrounding window, giving the LLM richer context.
-        windowed: list[NodeWithScore] = self._window_replacer.postprocess_nodes(
-            reranked, query_bundle=query_bundle
-        )
+        # Step 4 — window expansion: prefer the wider context window
+        for nws in candidates:
+            window = nws.node.metadata.get("window", "")
+            if window and window.strip():
+                nws.node.set_content(window.strip())
 
-        # ── Step 5: Map to response schema ────────────────────────────────────
+        # Step 5 — keep top_k, map to response schema
+        candidates = candidates[:top_k]
         results: list[ChunkResult] = []
-        for node_with_score in windowed:
-            node = node_with_score.node
-            meta = node.metadata or {}
-            results.append(
-                ChunkResult(
-                    node_id=node.node_id,
-                    document_id=meta.get("document_id"),
-                    filename=meta.get("filename") or meta.get("file_name"),
-                    content=node.get_content(),
-                    score=node_with_score.score or 0.0,
-                    metadata=meta,
-                )
-            )
+        for nws in candidates:
+            node  = nws.node
+            meta  = node.metadata or {}
+            content = self._get_text(node)
+            if not content:
+                continue
+            results.append(ChunkResult(
+                node_id=node.node_id,
+                document_id=self._first_valid(meta, "document_id", "source_document_id"),
+                filename=meta.get("filename") or meta.get("file_name"),
+                content=content,
+                score=float(nws.score or 0.0),
+                metadata=meta,
+            ))
 
+        logger.info("Retrieval complete", extra={"results": len(results)})
         return results
+
+    # ── Helpers ───────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _get_text(node: BaseNode) -> str:
+        """Return usable text from a node, falling back to metadata fields."""
+        try:
+            t = node.get_content(metadata_mode="none").strip()
+        except TypeError:
+            t = node.get_content().strip()
+        if t:
+            return t
+        meta = node.metadata or {}
+        for key in ("window", "original_text"):
+            v = meta.get(key)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+        return ""
+
+    def _hydrate(self, node: BaseNode) -> None:
+        """Ensure node.text is non-empty so downstream processors work."""
+        current = self._get_text(node)
+        if not current:
+            return
+        try:
+            existing = node.get_content(metadata_mode="none").strip()
+        except TypeError:
+            existing = node.get_content().strip()
+        if existing:
+            return
+        if hasattr(node, "set_content"):
+            node.set_content(current)
+        elif hasattr(node, "text"):
+            node.text = current  # type: ignore[attr-defined]
+
+    @staticmethod
+    def _first_valid(meta: dict, *keys: str) -> str | None:
+        for key in keys:
+            v = meta.get(key)
+            if v and str(v).strip().lower() not in _INVALID_METADATA_VALUES:
+                return str(v).strip()
+        return None

@@ -16,10 +16,6 @@ from typing import Any
 
 from llama_index.core.schema import BaseNode, NodeWithScore, TextNode
 from llama_index.core.vector_stores.types import (
-    MetadataFilter,
-    MetadataFilters,
-    FilterOperator,
-    FilterCondition,
     VectorStoreQuery,
     VectorStoreQueryMode,
 )
@@ -38,7 +34,11 @@ logger = get_logger(__name__)
 #   - `node_info` JSONB
 #   - `embedding` vector(384)
 #   - HNSW / IVFFlat index on embedding (configurable)
+# Logical name passed to PGVectorStore.from_params(table_name=...).
 CHUNK_TABLE_NAME = "document_chunks"
+# PGVectorStore 0.1.x materialises the physical table as data_{table_name}.
+PHYSICAL_CHUNK_TABLE_NAME = f"data_{CHUNK_TABLE_NAME}"
+SOURCE_DOCUMENT_ID_KEY = "source_document_id"
 
 
 def _build_pg_vector_store() -> PGVectorStore:
@@ -51,11 +51,13 @@ def _build_pg_vector_store() -> PGVectorStore:
     """
     return PGVectorStore.from_params(
         connection_string=settings.DATABASE_SYNC_URL,
+        async_connection_string=settings.DATABASE_URL,
         table_name=CHUNK_TABLE_NAME,
         embed_dim=settings.EMBED_DIM,    # ← must be 384; a mismatch here causes
                                           #   "different vector dimensions" errors
         hybrid_search=False,
         text_search_config="english",
+        perform_setup=True,
     )
 
 
@@ -86,8 +88,57 @@ class VectorRepository:
         if not nodes:
             return []
         ids = self._store.add(nodes)
+        self._backfill_source_document_id_metadata()
         logger.info("Nodes added to vector store", extra={"count": len(ids)})
         return ids
+
+    def backfill_empty_text(self) -> int:
+        """
+        One-time repair: copy metadata_->>'original_text' into the `text` column
+        for any rows where `text` is empty/null.
+
+        PGVectorStore silently excludes rows with empty text from vector search,
+        which causes queries to return zero results even when embeddings and
+        metadata are intact. Rows ingested by older pipeline versions that stored
+        content only in metadata fields are affected.
+
+        Returns the number of rows updated.
+        """
+        import sqlalchemy as sa
+
+        sql = sa.text(
+            f"""
+            UPDATE {PHYSICAL_CHUNK_TABLE_NAME}
+            SET text = COALESCE(
+                NULLIF(metadata_->>'original_text', ''),
+                NULLIF(metadata_->>'window', '')
+            )
+            WHERE (text IS NULL OR trim(text) = '')
+              AND COALESCE(
+                  NULLIF(metadata_->>'original_text', ''),
+                  NULLIF(metadata_->>'window', '')
+              ) IS NOT NULL
+            """
+        )
+        engine = sa.create_engine(settings.DATABASE_SYNC_URL)
+        try:
+            with engine.connect() as conn:
+                result = conn.execute(sql)
+                conn.commit()
+                count = result.rowcount
+            logger.info(
+                "Backfilled empty text column from metadata",
+                extra={"rows_updated": count, "table": PHYSICAL_CHUNK_TABLE_NAME},
+            )
+            return count
+        except Exception as exc:
+            logger.error(
+                "Failed to backfill empty text",
+                extra={"error": str(exc)},
+            )
+            raise
+        finally:
+            engine.dispose()
 
     # ── Delete ─────────────────────────────────────────────────────────────────
 
@@ -125,10 +176,12 @@ class VectorRepository:
         sync_url = settings.DATABASE_SYNC_URL
         engine = sa.create_engine(sync_url)
         with engine.connect() as conn:
+            self._backfill_source_document_id_metadata(conn)
             conn.execute(
                 sa.text(
-                    f"DELETE FROM {CHUNK_TABLE_NAME} "
-                    "WHERE metadata_->>'document_id' = :doc_id"
+                    f"DELETE FROM {PHYSICAL_CHUNK_TABLE_NAME} "
+                    f"WHERE metadata_->>'{SOURCE_DOCUMENT_ID_KEY}' = :doc_id "
+                    "OR metadata_->>'document_id' = :doc_id"
                 ),
                 {"doc_id": document_id},
             )
@@ -145,57 +198,129 @@ class VectorRepository:
         self,
         query_embedding: list[float],
         similarity_top_k: int = 15,
-        document_id: str | None = None,
-        extra_filters: dict[str, Any] | None = None,
     ) -> list[NodeWithScore]:
         """
-        Retrieve top-k candidates via cosine similarity.
-
-        Optionally apply MetadataFilters to restrict results by document_id
-        or arbitrary metadata keys.
+        Retrieve top-k chunks by cosine similarity. No metadata filtering.
         """
-        filters: MetadataFilters | None = None
-        filter_list: list[MetadataFilter] = []
-
-        if document_id:
-            filter_list.append(
-                MetadataFilter(
-                    key="document_id",
-                    value=document_id,
-                    operator=FilterOperator.EQ,
-                )
-            )
-
-        if extra_filters:
-            for k, v in extra_filters.items():
-                filter_list.append(
-                    MetadataFilter(key=k, value=str(v), operator=FilterOperator.EQ)
-                )
-
-        if filter_list:
-            filters = MetadataFilters(
-                filters=filter_list,
-                condition=FilterCondition.AND,
-            )
-
         query = VectorStoreQuery(
             query_embedding=query_embedding,
             similarity_top_k=similarity_top_k,
             mode=VectorStoreQueryMode.DEFAULT,
-            filters=filters,
         )
 
         result = self._store.query(query)
 
         nodes_with_scores: list[NodeWithScore] = []
-        for node, score in zip(result.nodes or [], result.similarities or []):
-            nodes_with_scores.append(NodeWithScore(node=node, score=score))
+        nodes        = result.nodes or []
+        similarities = result.similarities or []
 
-        logger.debug(
-            "Vector search completed",
-            extra={"candidates": len(nodes_with_scores), "top_k": similarity_top_k},
-        )
+        if len(similarities) < len(nodes):
+            similarities = list(similarities) + [0.0] * (len(nodes) - len(similarities))
+
+        for node, score in zip(nodes, similarities):
+            nodes_with_scores.append(NodeWithScore(node=node, score=float(score or 0.0)))
+
+        if not nodes_with_scores:
+            stored = self._count_stored_chunks()
+            logger.warning(
+                "Vector search returned no candidates",
+                extra={"top_k": similarity_top_k, "stored_chunks": stored},
+            )
+        else:
+            logger.debug(
+                "Vector search complete",
+                extra={"candidates": len(nodes_with_scores)},
+            )
+
         return nodes_with_scores
+
+    def _count_stored_chunks(self) -> int | None:
+        """Return row count in the physical pgvector table (for diagnostics)."""
+        import sqlalchemy as sa
+
+        try:
+            engine = sa.create_engine(settings.DATABASE_SYNC_URL)
+            with engine.connect() as conn:
+                count = conn.execute(
+                    sa.text(f"SELECT COUNT(*) FROM {PHYSICAL_CHUNK_TABLE_NAME}")
+                ).scalar()
+            engine.dispose()
+            return int(count or 0)
+        except Exception as exc:
+            logger.debug(
+                "Could not count stored chunks",
+                extra={"table": PHYSICAL_CHUNK_TABLE_NAME, "error": str(exc)},
+            )
+            return None
+
+    def _backfill_source_document_id_metadata(self, conn: Any | None = None) -> None:
+        """
+        Make the physical PGVectorStore JSON metadata filterable by our document id.
+
+        Older rows, and some LlamaIndex serializations, store the correct app
+        document id inside `_node_content` while the top-level `document_id`
+        field is `"None"`. MetadataFilters only see top-level JSON keys, so we
+        copy the real id into `source_document_id` and also repair
+        `document_id` where possible for easier manual debugging.
+        """
+        import sqlalchemy as sa
+
+        sql = sa.text(
+            f"""
+            WITH resolved AS (
+                SELECT
+                    id,
+                    COALESCE(
+                        NULLIF(metadata_->>'{SOURCE_DOCUMENT_ID_KEY}', ''),
+                        NULLIF(NULLIF(metadata_->>'document_id', ''), 'None'),
+                        CASE
+                            WHEN btrim(COALESCE(metadata_->>'_node_content', '')) LIKE '{{%'
+                            THEN NULLIF(
+                                ((metadata_->>'_node_content')::jsonb #>> '{{metadata,document_id}}'),
+                                'None'
+                            )
+                        END
+                    ) AS source_document_id
+                FROM {PHYSICAL_CHUNK_TABLE_NAME}
+            )
+            UPDATE {PHYSICAL_CHUNK_TABLE_NAME} AS chunks
+            SET metadata_ = jsonb_set(
+                jsonb_set(
+                    chunks.metadata_,
+                    '{{{SOURCE_DOCUMENT_ID_KEY}}}',
+                    to_jsonb(resolved.source_document_id),
+                    true
+                ),
+                '{{document_id}}',
+                to_jsonb(resolved.source_document_id),
+                true
+            )
+            FROM resolved
+            WHERE chunks.id = resolved.id
+              AND resolved.source_document_id IS NOT NULL
+              AND (
+                  chunks.metadata_->>'{SOURCE_DOCUMENT_ID_KEY}' IS DISTINCT FROM resolved.source_document_id
+                  OR chunks.metadata_->>'document_id' IS DISTINCT FROM resolved.source_document_id
+              )
+            """
+        )
+
+        if conn is not None:
+            conn.execute(sql)
+            return
+
+        engine = sa.create_engine(settings.DATABASE_SYNC_URL)
+        try:
+            with engine.connect() as owned_conn:
+                owned_conn.execute(sql)
+                owned_conn.commit()
+        except Exception as exc:
+            logger.debug(
+                "Could not backfill vector metadata document id",
+                extra={"table": PHYSICAL_CHUNK_TABLE_NAME, "error": str(exc)},
+            )
+        finally:
+            engine.dispose()
 
     def get_store(self) -> PGVectorStore:
         """Expose underlying store for use in LlamaIndex index construction."""

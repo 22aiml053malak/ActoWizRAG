@@ -77,91 +77,22 @@ def ingest_document_task(self: Task, document_id: str) -> dict:
     """
     Background task: ingest a document from disk into the vector store.
 
-    1. Mark status='processing'.
-    2. Run IngestionService.ingest().
-    3. Mark status='completed' with chunk_count.
-    4. On error: mark status='failed', store error_message, log full traceback.
+    Delegates to run_ingestion() which handles status updates and error handling.
     """
     logger.info("Ingestion task started", extra={"document_id": document_id})
-
-    session, engine = _make_sync_session()
     try:
-        # ── Mark processing ────────────────────────────────────────────────────
-        _update_document_status_sync(session, document_id, "processing")
+        from app.services.sync_ingest import run_ingestion
 
-        # ── Load document metadata from DB ─────────────────────────────────────
-        from sqlalchemy import text as sql_text
-
-        row = session.execute(
-            sql_text(
-                "SELECT filename, file_type, storage_path "
-                "FROM documents WHERE id = :doc_id"
-            ),
-            {"doc_id": uuid.UUID(document_id)},
-        ).fetchone()
-
-        if row is None:
-            raise ValueError(f"Document {document_id} not found in DB")
-
-        filename, file_type, storage_path = row.filename, row.file_type, row.storage_path
-
-        # ── Run ingestion pipeline ─────────────────────────────────────────────
-        from app.repositories.vector_repository import VectorRepository
-        from app.services.chunking_service import ChunkingService
-        from app.services.embedding_service import EmbeddingService
-        from app.services.ingestion_service import IngestionService
-
-        vector_repo = VectorRepository()
-        chunking_svc = ChunkingService()
-        embedding_svc = EmbeddingService()
-        ingestion_svc = IngestionService(
-            vector_repo=vector_repo,
-            chunking_service=chunking_svc,
-            embedding_service=embedding_svc,
-        )
-
-        chunk_count = ingestion_svc.ingest(
-            document_id=document_id,
-            storage_path=storage_path,
-            filename=filename,
-            file_type=file_type,
-        )
-
-        # ── Mark completed ─────────────────────────────────────────────────────
-        _update_document_status_sync(
-            session, document_id, "completed", chunk_count=chunk_count
-        )
-        logger.info(
-            "Ingestion task completed",
-            extra={"document_id": document_id, "chunk_count": chunk_count},
-        )
+        chunk_count = run_ingestion(document_id)
         return {"document_id": document_id, "status": "completed", "chunk_count": chunk_count}
-
     except Exception as exc:
         tb = traceback.format_exc()
+        error_detail = getattr(exc, "detail", str(exc))
         logger.error(
             "Ingestion task failed",
-            extra={"document_id": document_id, "error": str(exc), "traceback": tb},
+            extra={"document_id": document_id, "error": error_detail, "traceback": tb},
         )
-        try:
-            _update_document_status_sync(
-                session,
-                document_id,
-                "failed",
-                error_message=f"{type(exc).__name__}: {exc}",
-            )
-        except Exception as db_exc:
-            logger.error(
-                "Could not update document status to failed",
-                extra={"document_id": document_id, "db_error": str(db_exc)},
-            )
-        # Celery will not retry automatically unless we call self.retry().
-        # We raise here to let Celery mark the task as FAILURE.
         raise
-
-    finally:
-        session.close()
-        engine.dispose()
 
 
 @celery_app.task(

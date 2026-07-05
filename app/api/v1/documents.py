@@ -11,6 +11,7 @@ No business logic, no raw DB/vector calls here.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 
 from fastapi import APIRouter, Depends, File, UploadFile, Query
@@ -26,6 +27,7 @@ from app.models.response import (
     DocumentUploadResponse,
 )
 from app.repositories.document_repository import DocumentRepository
+from app.services.sync_ingest import run_ingestion
 from app.utils.file_storage import get_file_type, save_upload
 from app.workers.ingestion_tasks import delete_document_task, ingest_document_task
 
@@ -41,7 +43,8 @@ router = APIRouter(prefix="/documents", tags=["Documents"])
     status_code=202,
     summary="Upload a document for ingestion",
     description=(
-        "Upload a PDF, Markdown, text, or code file. "
+        "Upload a PDF, DOCX, Markdown, text, or code file. "
+        "PDF and DOCX are parsed with table-aware loaders (pymupdf4llm / python-docx). "
         "The file is saved to disk and queued for async chunking + embedding. "
         "Returns 202 immediately; poll GET /documents/{id} for status."
     ),
@@ -66,14 +69,26 @@ async def upload_document(
         storage_path=storage_path,
     )
 
-    # Enqueue Celery task.
-    ingest_document_task.delay(str(document_id))
+    # Commit BEFORE enqueueing Celery — otherwise the worker may not see the row yet.
+    await session.commit()
+
+    status = "pending"
+    try:
+        ingest_document_task.delay(str(document_id))
+    except Exception as exc:
+        logger.warning(
+            "Celery unavailable — ingesting synchronously",
+            extra={"document_id": str(document_id), "error": str(exc)},
+        )
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, run_ingestion, str(document_id))
+        status = "completed"
 
     logger.info(
         "Document upload accepted",
-        extra={"document_id": str(document_id), "filename": filename},
+        extra={"document_id": str(document_id), "file_name": filename, "status": status},
     )
-    return DocumentUploadResponse(document_id=document_id, status="pending")
+    return DocumentUploadResponse(document_id=document_id, status=status)
 
 
 # ── GET /documents ─────────────────────────────────────────────────────────────
@@ -141,9 +156,15 @@ async def delete_document(
 
     # Soft-delete immediately (status='deleting', deleted_at=now).
     await repo.soft_delete(document_id)
+    await session.commit()
 
-    # Enqueue hard-delete of vectors + DB row.
-    delete_document_task.delay(str(document_id))
+    try:
+        delete_document_task.delay(str(document_id))
+    except Exception as exc:
+        logger.warning(
+            "Celery unavailable — delete task not queued",
+            extra={"document_id": str(document_id), "error": str(exc)},
+        )
 
     logger.info("Delete queued", extra={"document_id": str(document_id)})
     return DeleteResponse(

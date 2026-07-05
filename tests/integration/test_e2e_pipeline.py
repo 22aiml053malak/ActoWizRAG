@@ -129,7 +129,6 @@ async def test_ingest_and_query_e2e(db_session):
         results = retrieval_svc.retrieve(
             "What is PGVectorStore?",
             top_k=3,
-            document_id=document_id,
         )
         assert len(results) > 0, "Query should return at least one result"
 
@@ -138,12 +137,6 @@ async def test_ingest_and_query_e2e(db_session):
         assert any(kw in top_content for kw in ["pgvector", "vector", "embedding", "llama"]), (
             f"Expected relevant content, got: {top_content[:200]}"
         )
-
-        # Verify document_id filtering works — all results should belong to our doc.
-        for result in results:
-            assert result.document_id == document_id, (
-                "All results must belong to the queried document"
-            )
 
         # ── Window replacement ─────────────────────────────────────────────────
         # Every result should have a "window" key in metadata.

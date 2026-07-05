@@ -91,6 +91,7 @@ class TestProseChunking:
         )
         for node in nodes:
             assert node.metadata.get("document_id") == "doc-abc"
+            assert node.metadata.get("source_document_id") == "doc-abc"
 
     def test_file_type_in_metadata(self, chunking_service):
         nodes = chunking_service.chunk(

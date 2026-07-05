@@ -23,6 +23,7 @@ logger = get_logger(__name__)
 # Allowed extensions → normalised file_type label
 ALLOWED_EXTENSIONS: dict[str, str] = {
     ".pdf": "pdf",
+    ".docx": "docx",
     ".txt": "text",
     ".md": "markdown",
     ".py": "code",
@@ -99,7 +100,7 @@ async def save_upload(file: UploadFile, document_id: str) -> str:
 
     logger.info(
         "File saved",
-        extra={"document_id": document_id, "path": str(dest_path), "filename": safe_name},
+        extra={"document_id": document_id, "path": str(dest_path), "file_name": safe_name},
     )
     return str(dest_path)
 

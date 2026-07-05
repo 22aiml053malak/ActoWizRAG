@@ -1,0 +1,29 @@
+ActoWiz Internal AI Knowledge Platform - Assignment Overview
+
+Goal of the Assignment:
+The goal of this assignment is to evaluate your understanding of API Design,
+RAG/Semantic Search Systems, AI Infrastructure, Database Design, Scalability
+and Reliability, and Production Engineering Practices.
+
+The platform allows internal developers to:
+1. Upload documents and code files
+2. Query documents using natural language
+3. Delete documents
+4. Perform semantic search over uploaded knowledge
+5. Access LLMs through a centralized AI Gateway
+
+The platform will be used internally by approximately 100 developers.
+
+Key Technical Components:
+- FastAPI for the REST API
+- PostgreSQL with pgvector extension for vector storage
+- Celery and Redis for async document ingestion
+- HuggingFace sentence-transformers for embeddings (384 dimensions)
+- Cross-encoder reranking for improved retrieval precision
+- Groq LLM for answer generation
+
+Expected Deliverables:
+- Document upload, query, and delete APIs
+- Semantic search with reranking and sentence-window context expansion
+- Async ingestion pipeline with status tracking
+- Docker Compose setup for local development

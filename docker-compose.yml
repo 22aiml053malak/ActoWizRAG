@@ -3,9 +3,10 @@ version: "3.9"
 # ── Shared environment ────────────────────────────────────────────────────────
 # Override any of these in your .env file — docker-compose reads .env automatically.
 x-app-env: &app-env
-  DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://postgres:postgres@postgres:5432/actowiz_rag}
-  DATABASE_SYNC_URL: ${DATABASE_SYNC_URL:-postgresql://postgres:postgres@postgres:5432/actowiz_rag}
-  REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+  # Use Docker service hostnames here — do NOT inherit localhost URLs from .env.
+  DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/actowiz_rag
+  DATABASE_SYNC_URL: postgresql://postgres:postgres@postgres:5432/actowiz_rag
+  REDIS_URL: redis://redis:6379/0
   EMBED_MODEL_NAME: ${EMBED_MODEL_NAME:-sentence-transformers/all-MiniLM-L6-v2}
   EMBED_DIM: ${EMBED_DIM:-384}
   RERANK_MODEL_NAME: ${RERANK_MODEL_NAME:-cross-encoder/ms-marco-MiniLM-L-6-v2}
@@ -19,7 +20,7 @@ x-app-env: &app-env
   LLM_PROVIDER: ${LLM_PROVIDER:-groq}
   LLM_API_KEY: ${LLM_API_KEY:-}
   LLM_API_BASE_URL: ${LLM_API_BASE_URL:-https://api.groq.com/openai/v1}
-  LLM_MODEL_NAME: ${LLM_MODEL_NAME:-llama3-8b-8192}
+  LLM_MODEL_NAME: ${LLM_MODEL_NAME:-llama-3.1-8b-instant}
   LLM_MAX_TOKENS: ${LLM_MAX_TOKENS:-1024}
   LLM_TEMPERATURE: ${LLM_TEMPERATURE:-0.1}
   APP_ENV: ${APP_ENV:-development}

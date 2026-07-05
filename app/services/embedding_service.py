@@ -38,11 +38,24 @@ class EmbeddingService:
 
     def embed_query(self, text: str) -> list[float]:
         """Embed a single query string."""
-        return self._model.get_query_embedding(text)
+        embedding = self._model.get_query_embedding(text)
+        if len(embedding) != settings.EMBED_DIM:
+            raise ValueError(
+                f"Query embedding dim {len(embedding)} != EMBED_DIM {settings.EMBED_DIM}. "
+                "Check EMBED_MODEL_NAME and EMBED_DIM in .env."
+            )
+        return embedding
 
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
         """Batch-embed a list of texts (used during ingestion)."""
-        return self._model.get_text_embedding_batch(texts, show_progress=True)
+        embeddings = self._model.get_text_embedding_batch(texts, show_progress=True)
+        for embedding in embeddings:
+            if len(embedding) != settings.EMBED_DIM:
+                raise ValueError(
+                    f"Document embedding dim {len(embedding)} != EMBED_DIM {settings.EMBED_DIM}. "
+                    "Check EMBED_MODEL_NAME and EMBED_DIM in .env."
+                )
+        return embeddings
 
     def get_model(self) -> HuggingFaceEmbedding:
         """Return the underlying LlamaIndex embedding model (for node embedding)."""
